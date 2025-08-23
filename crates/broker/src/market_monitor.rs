@@ -39,7 +39,7 @@ use crate::{chain_monitor::ChainMonitorService, db::DbObj, errors::{impl_coded_d
 use thiserror::Error;
 use crate::config::ConfigLock;
 use crate::provers::ProverObj;
-use warp::Filter;
+
 use serde::{Deserialize, Serialize};
 
 const BLOCK_TIME_SAMPLE_SIZE: u64 = 10;
@@ -49,9 +49,6 @@ pub enum MarketMonitorErr {
     #[error("{code} Mempool polling failed: {0:?}", code = self.code())]
     MempoolPollingErr(anyhow::Error),
 
-    #[error("{code} HTTP server failed: {0:?}", code = self.code())]
-    HttpServerErr(anyhow::Error),
-
     #[error("{code} Unexpected error: {0:?}", code = self.code())]
     UnexpectedErr(#[from] anyhow::Error),
 }
@@ -60,7 +57,6 @@ impl CodedError for MarketMonitorErr {
     fn code(&self) -> &str {
         match self {
             MarketMonitorErr::MempoolPollingErr(_) => "[B-MM-501]",
-            MarketMonitorErr::HttpServerErr(_) => "[B-MM-502]",
             MarketMonitorErr::UnexpectedErr(_) => "[B-MM-500]",
         }
     }
@@ -123,118 +119,201 @@ where
         }
     }
 
-    // 🆕 HTTP Server başlatma
-    async fn start_http_server(
+    // Basit HTTP server - axum kullanmak yerine manuel TCP
+    async fn run_simple_http_server(
         market_addr: Address,
         provider: Arc<P>,
         config: ConfigLock,
         db_obj: DbObj,
-        prover_addr: Address,
         cancel_token: CancellationToken,
-    ) -> std::result::Result<(), MarketMonitorErr> {
-        tracing::info!("🌐 Starting HTTP server for Node.js communication...");
+    ) -> Result<()> {
+        use std::net::SocketAddr;
+        use tokio::net::TcpListener;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        // Cloneable types for filters
-        let market_addr_for_filter = market_addr.clone();
-        let provider_for_filter = provider.clone();
-        let config_for_filter = config.clone();
-        let db_obj_for_filter = db_obj.clone();
+        tracing::info!("🌐 Starting simple HTTP server on port 3001");
 
-        // POST /api/lock-transaction endpoint
-        let lock_transaction = warp::path!("api" / "lock-transaction")
-            .and(warp::post())
-            .and(warp::body::json())
-            .and_then({
-                let market_addr = market_addr_for_filter.clone();
-                let provider = provider_for_filter.clone();
-                let config = config_for_filter.clone();
-                let db_obj = db_obj_for_filter.clone();
+        let addr: SocketAddr = "0.0.0.0:3001".parse().unwrap();
+        let listener = TcpListener::bind(addr).await?;
 
-                move |req: LockTransactionRequest| {
-                    let market_addr = market_addr.clone();
-                    let provider = provider.clone();
-                    let config = config.clone();
-                    let db_obj = db_obj.clone();
+        tracing::info!("✅ HTTP server listening on http://{}", addr);
+        tracing::info!("📝 Available endpoints:");
+        tracing::info!("   POST /api/lock-transaction - Process lock transaction");
+        tracing::info!("   GET  /api/committed-orders-count - Get orders count");
+        tracing::info!("   GET  /health - Health check");
 
-                    async move {
+        loop {
+            tokio::select! {
+                result = listener.accept() => {
+                    match result {
+                        Ok((mut socket, _)) => {
+                            let market_addr = market_addr;
+                            let provider = provider.clone();
+                            let config = config.clone();
+                            let db_obj = db_obj.clone();
+
+                            tokio::spawn(async move {
+                                let mut buffer = [0; 4096];
+                                match socket.read(&mut buffer).await {
+                                    Ok(n) if n > 0 => {
+                                        let request = String::from_utf8_lossy(&buffer[..n]);
+                                        let response = Self::handle_http_request(
+                                            &request,
+                                            market_addr,
+                                            provider,
+                                            config,
+                                            db_obj
+                                        ).await;
+
+                                        if let Err(e) = socket.write_all(response.as_bytes()).await {
+                                            tracing::warn!("Failed to write response: {}", e);
+                                        }
+                                    }
+                                    Ok(_) => {
+                                        tracing::debug!("Empty request received");
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Failed to read from socket: {}", e);
+                                    }
+                                }
+                            });
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to accept connection: {}", e);
+                        }
+                    }
+                }
+                _ = cancel_token.cancelled() => {
+                    tracing::info!("HTTP server cancelled");
+                    break;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn handle_http_request(
+        request: &str,
+        market_addr: Address,
+        provider: Arc<P>,
+        config: ConfigLock,
+        db_obj: DbObj,
+    ) -> String {
+        let lines: Vec<&str> = request.lines().collect();
+        if lines.is_empty() {
+            return Self::http_response(400, "Bad Request", "");
+        }
+
+        let request_line = lines[0];
+        let parts: Vec<&str> = request_line.split_whitespace().collect();
+        if parts.len() < 2 {
+            return Self::http_response(400, "Bad Request", "");
+        }
+
+        let method = parts[0];
+        let path = parts[1];
+
+        match (method, path) {
+            ("GET", "/health") => {
+                let body = serde_json::json!({
+                    "status": "ok",
+                    "service": "market-monitor",
+                    "timestamp": chrono::Utc::now().to_rfc3339()
+                });
+                Self::http_response(200, "OK", &body.to_string())
+            }
+            ("GET", "/api/committed-orders-count") => {
+                match db_obj.get_committed_orders().await {
+                    Ok(orders) => {
+                        let body = CommittedOrdersResponse { count: orders.len() };
+                        Self::http_response(200, "OK", &serde_json::to_string(&body).unwrap_or_default())
+                    }
+                    Err(e) => {
+                        let body = ApiResponse {
+                            success: false,
+                            message: None,
+                            error: Some(format!("Database error: {}", e)),
+                        };
+                        Self::http_response(500, "Internal Server Error", &serde_json::to_string(&body).unwrap_or_default())
+                    }
+                }
+            }
+            ("POST", "/api/lock-transaction") => {
+                // JSON body'yi bul
+                let mut body_start = false;
+                let mut json_body = String::new();
+
+                for line in lines.iter() {
+                    if body_start {
+                        json_body.push_str(line);
+                        json_body.push('\n');
+                    } else if line.is_empty() {
+                        body_start = true;
+                    }
+                }
+
+                match serde_json::from_str::<LockTransactionRequest>(&json_body.trim()) {
+                    Ok(req) => {
                         match Self::handle_lock_transaction(req, market_addr, provider, config, db_obj).await {
-                            Ok(_) => Ok(warp::reply::json(&ApiResponse {
-                                success: true,
-                                message: Some("Lock transaction processed successfully".to_string()),
-                                error: None,
-                            })),
+                            Ok(_) => {
+                                let body = ApiResponse {
+                                    success: true,
+                                    message: Some("Lock transaction processed successfully".to_string()),
+                                    error: None,
+                                };
+                                Self::http_response(200, "OK", &serde_json::to_string(&body).unwrap_or_default())
+                            }
                             Err(e) => {
-                                tracing::error!("Failed to process lock transaction: {:?}", e);
-                                Ok(warp::reply::json(&ApiResponse {
+                                let body = ApiResponse {
                                     success: false,
                                     message: None,
                                     error: Some(format!("Processing failed: {}", e)),
-                                }))
+                                };
+                                Self::http_response(500, "Internal Server Error", &serde_json::to_string(&body).unwrap_or_default())
                             }
                         }
                     }
-                }
-            });
-
-        // GET /api/committed-orders-count endpoint
-        let committed_orders_count = warp::path!("api" / "committed-orders-count")
-            .and(warp::get())
-            .and_then({
-                let db_obj = db_obj_for_filter.clone();
-
-                move || {
-                    let db_obj = db_obj.clone();
-
-                    async move {
-                        match db_obj.get_committed_orders().await {
-                            Ok(orders) => Ok(warp::reply::json(&CommittedOrdersResponse {
-                                count: orders.len(),
-                            })),
-                            Err(e) => {
-                                tracing::error!("Failed to get committed orders count: {:?}", e);
-                                Ok(warp::reply::json(&ApiResponse {
-                                    success: false,
-                                    message: None,
-                                    error: Some(format!("Database error: {}", e)),
-                                }))
-                            }
-                        }
+                    Err(e) => {
+                        let body = ApiResponse {
+                            success: false,
+                            message: None,
+                            error: Some(format!("Invalid JSON: {}", e)),
+                        };
+                        Self::http_response(400, "Bad Request", &serde_json::to_string(&body).unwrap_or_default())
                     }
                 }
-            });
-
-        // CORS support
-        let cors = warp::cors()
-            .allow_any_origin()
-            .allow_headers(vec!["content-type"])
-            .allow_methods(vec!["GET", "POST"]);
-
-        let routes = lock_transaction
-            .or(committed_orders_count)
-            .with(cors)
-            .with(warp::log("api"));
-
-        // Start server on port 3001
-        let server = warp::serve(routes).run(([0, 0, 0, 0], 3001));
-
-        tracing::info!("🌐 HTTP server started on http://0.0.0.0:3001");
-        tracing::info!("📝 Available endpoints:");
-        tracing::info!("   POST /api/lock-transaction - Process lock transaction from Node.js");
-        tracing::info!("   GET  /api/committed-orders-count - Get committed orders count");
-
-        tokio::select! {
-            _ = server => {
-                tracing::info!("HTTP server terminated");
-                Ok(())
             }
-            _ = cancel_token.cancelled() => {
-                tracing::info!("HTTP server cancelled");
-                Ok(())
+            ("OPTIONS", _) => {
+                // CORS preflight
+                format!(
+                    "HTTP/1.1 200 OK\r\n\
+                     Access-Control-Allow-Origin: *\r\n\
+                     Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\
+                     Access-Control-Allow-Headers: Content-Type\r\n\
+                     Content-Length: 0\r\n\r\n"
+                )
             }
+            _ => Self::http_response(404, "Not Found", ""),
         }
     }
 
-    // 🆕 Node.js'den gelen lock transaction'ları işle
+    fn http_response(status_code: u16, status_text: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {} {}\r\n\
+             Content-Type: application/json\r\n\
+             Access-Control-Allow-Origin: *\r\n\
+             Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\
+             Access-Control-Allow-Headers: Content-Type\r\n\
+             Content-Length: {}\r\n\r\n{}",
+            status_code,
+            status_text,
+            body.len(),
+            body
+        )
+    }
+
+    // Node.js'den gelen lock transaction'ları işle
     async fn handle_lock_transaction(
         req: LockTransactionRequest,
         market_addr: Address,
@@ -247,7 +326,7 @@ where
         tracing::info!("   - Lock Block: {}", req.lock_block);
 
         // Parse transaction hash
-        let tx_hash_bytes = req.tx_hash.parse::<alloy::primitives::TxHash>()
+        let _tx_hash_bytes = req.tx_hash.parse::<alloy::primitives::TxHash>()
             .map_err(|e| anyhow::anyhow!("Invalid tx hash: {}", e))?;
 
         // Input'u decode et
@@ -403,24 +482,29 @@ where
     fn spawn(&self, cancel_token: CancellationToken) -> RetryRes<Self::Error> {
         let market_addr = self.market_addr;
         let provider = self.provider.clone();
+        let db = self.db_obj.clone();
         let config = self.config.clone();
-        let db_obj = self.db_obj.clone();
-        let prover_addr = self.prover_addr;
 
+        // Basit approach - HTTP server'ı direkt çalıştır
         Box::pin(async move {
-            tracing::info!("🦀 Starting Market Monitor HTTP Server Mode");
+            tracing::info!("🚀 Starting market monitor with simple HTTP server");
 
-            // HTTP server'ı başlat - bu sürekli çalışacak
-            Self::start_http_server(
+            match Self::run_simple_http_server(
                 market_addr,
                 provider,
                 config,
-                db_obj,
-                prover_addr,
+                db,
                 cancel_token,
-            )
-                .await
-                .map_err(|e| SupervisorErr::Task(MarketMonitorErr::HttpServerErr(e.into())))
+            ).await {
+                Ok(()) => {
+                    tracing::info!("✅ HTTP server completed successfully");
+                    Ok(())
+                }
+                Err(e) => {
+                    tracing::error!("❌ HTTP server failed: {:?}", e);
+                    Err(SupervisorErr::Fault(MarketMonitorErr::UnexpectedErr(e)))
+                }
+            }
         })
     }
 }

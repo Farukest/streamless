@@ -44,7 +44,7 @@ impl<E: CodedError> CodedError for SupervisorErr<E> {
 
 #[allow(type_alias_bounds)]
 pub type RetryRes<E: CodedError> =
-    Pin<Box<dyn Future<Output = Result<(), SupervisorErr<E>>> + Send + 'static>>;
+Pin<Box<dyn Future<Output = Result<(), SupervisorErr<E>>> + Send + 'static>>;
 
 pub trait RetryTask {
     type Error: CodedError;
