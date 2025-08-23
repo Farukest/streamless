@@ -25,6 +25,7 @@ use alloy::{
 
 use alloy::rpc::types::Transaction;
 use alloy::consensus::Transaction as _;
+use alloy::signers::k256::U256;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use boundless_market::{
