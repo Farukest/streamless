@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::time::Duration;
 use crate::order_monitor::OrderMonitorErr;
 use alloy::{
     network::Ethereum,
@@ -192,6 +193,38 @@ where
 
         Ok(())
     }
+
+    async fn calculate_lock_price_with_retry(
+        provider: Arc<P>,
+        lock_block: u64,
+        new_order: &OrderRequest,
+    ) -> Result<(u64, U256)> {
+        tracing::info!("📊 Attempting to calculate lock price for block: {}", lock_block);
+
+        // Step 1: Get block data
+        let block = provider
+            .get_block_by_number(lock_block.into())
+            .await
+            .context(format!("Failed to get block data for block: {}", lock_block))?;
+
+        let block = block
+            .context(format!("Block {} not found on chain", lock_block))?;
+
+        let lock_timestamp = block.header.timestamp;
+        tracing::info!("📅 Lock timestamp: {}", lock_timestamp);
+
+        // Step 2: Calculate price at timestamp
+        let lock_price = new_order
+            .request
+            .offer
+            .price_at(lock_timestamp)
+            .context(format!("Failed to calculate price at timestamp: {}", lock_timestamp))?;
+
+        tracing::info!("💰 Calculated lock price: {} for timestamp: {}", lock_price, lock_timestamp);
+
+        Ok((lock_timestamp, lock_price))
+    }
+
 
     async fn handle_http_request(
         request: &str,
@@ -393,20 +426,24 @@ where
 
         tracing::info!("✅ Successfully received lock for request: 0x{:x} at block {}", request_id, req.lock_block);
 
-        // Calculate lock price and save to DB
-        let lock_timestamp = provider
-            .get_block_by_number(req.lock_block.into())
-            .await
-            .context("Failed to get lock block")?
-            .context("Lock block not found")?
-            .header
-            .timestamp;
-
-        let lock_price = new_order
-            .request
-            .offer
-            .price_at(lock_timestamp)
-            .context("Failed to calculate lock price")?;
+        let (lock_timestamp, lock_price) = loop {
+            match Self::calculate_lock_price_with_retry(
+                provider.clone(),
+                req.lock_block.into(),
+                &new_order
+            ).await {
+                Ok((timestamp, price)) => {
+                    tracing::info!("✅ Successfully calculated lock price: {} at timestamp: {}", price, timestamp);
+                    break (timestamp, price);
+                }
+                Err(e) => {
+                    tracing::error!("❌ Failed to calculate lock price: {:?}", e);
+                    tracing::info!("⏳ Retrying in 60 seconds...");
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    continue; // Sonsuz döngü - başarılı olana kadar denemeye devam et
+                }
+            }
+        };
 
         // Try to get confirmed transaction data
         let final_order = match Self::fetch_confirmed_transaction_data_by_input(provider.clone(), &req.input_hex).await {
