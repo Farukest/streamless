@@ -17,7 +17,7 @@ use std::time::Duration;
 use crate::order_monitor::OrderMonitorErr;
 use alloy::{
     network::Ethereum,
-    primitives::{Address, B256},
+    primitives::{Address, B256, U256},
     providers::Provider,
     sol,
     sol_types::SolCall,
@@ -25,7 +25,6 @@ use alloy::{
 
 use alloy::rpc::types::Transaction;
 use alloy::consensus::Transaction as _;
-use alloy::signers::k256::U256;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use boundless_market::{
