@@ -271,7 +271,7 @@ where
                     }
                 }
             }
-            ("/POST", "/api/lock-transaction") => {
+            ("POST", "/api/lock-transaction") => {
                 tracing::info!("🚨 Node.js'den POST /api/lock-transaction request geldi!");
                 tracing::info!("📋 Request content başlıyor...");
 
