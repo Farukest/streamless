@@ -384,11 +384,11 @@ where
 
         let input_hex = format!("0x{}", hex::encode(&input_bytes));
 
-        // Try to decode as submitRequest
-        let decoded = match IBoundlessMarket::submitRequestCall::abi_decode(&input_bytes) {
+        // Try to decode as lockRequestCall
+        let decoded = match IBoundlessMarket::lockRequestCall::abi_decode(&input_bytes) {
             Ok(call) => call,
             Err(_) => {
-                tracing::debug!("Transaction is not submitRequest, skipping");
+                tracing::debug!("Transaction is not lockRequestCall, skipping");
                 return Ok(());
             }
         };
@@ -396,7 +396,7 @@ where
         let client_addr = decoded.request.client_address();
         let request_id = decoded.request.id;
 
-        tracing::info!("📋 Processing submitRequest from lock:");
+        tracing::info!("📋 Processing lockRequestCall from lock:");
         tracing::info!("   - Request ID: 0x{:x}", request_id);
         tracing::info!("   - Client: 0x{:x}", client_addr);
 
@@ -508,7 +508,7 @@ where
         let input_bytes = hex::decode(&input_hex[2..])
             .context("Failed to decode input hex")?;
 
-        let decoded_call = IBoundlessMarket::submitRequestCall::abi_decode(&input_bytes)
+        let decoded_call = IBoundlessMarket::lockRequestCall::abi_decode(&input_bytes)
             .context("Failed to decode transaction input")?;
 
         tracing::debug!("✅ Input data decoded successfully");
