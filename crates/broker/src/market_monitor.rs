@@ -69,7 +69,6 @@ impl_coded_debug!(MarketMonitorErr);
 struct LockTransactionRequest {
     tx_hash: String,
     lock_block: u64,
-    input_hex: String,
 }
 
 #[derive(Serialize)]
@@ -272,7 +271,10 @@ where
                     }
                 }
             }
-            ("POST", "/api/lock-transaction") => {
+            ("/POST", "/api/lock-transaction") => {
+                tracing::info!("🚨 Node.js'den POST /api/lock-transaction request geldi!");
+                tracing::info!("📋 Request content başlıyor...");
+
                 // JSON body'yi bul
                 let mut body_start = false;
                 let mut json_body = String::new();
@@ -286,10 +288,17 @@ where
                     }
                 }
 
+                tracing::info!("📄 Raw JSON body: {}", json_body.trim());
+
                 match serde_json::from_str::<LockTransactionRequest>(&json_body.trim()) {
                     Ok(req) => {
+                        tracing::info!("✅ JSON parse başarılı!");
+                        tracing::info!("   - TX Hash: {}", req.tx_hash);
+                        tracing::info!("   - Lock Block: {}", req.lock_block);
+
                         match Self::handle_lock_transaction(req, market_addr, provider, config, db_obj).await {
                             Ok(_) => {
+                                tracing::info!("✅ handle_lock_transaction başarıyla tamamlandı!");
                                 let body = ApiResponse {
                                     success: true,
                                     message: Some("Lock transaction processed successfully".to_string()),
@@ -298,6 +307,7 @@ where
                                 Self::http_response(200, "OK", &serde_json::to_string(&body).unwrap_or_default())
                             }
                             Err(e) => {
+                                tracing::error!("❌ handle_lock_transaction hatası: {:?}", e);
                                 let body = ApiResponse {
                                     success: false,
                                     message: None,
@@ -308,6 +318,9 @@ where
                         }
                     }
                     Err(e) => {
+                        tracing::error!("❌ JSON parse hatası: {:?}", e);
+                        tracing::error!("📄 Hatalı JSON body: {}", json_body.trim());
+
                         let body = ApiResponse {
                             success: false,
                             message: None,
@@ -358,18 +371,25 @@ where
         tracing::info!("   - TX Hash: {}", req.tx_hash);
         tracing::info!("   - Lock Block: {}", req.lock_block);
 
-        // Parse transaction hash
-        let _tx_hash_bytes = req.tx_hash.parse::<alloy::primitives::TxHash>()
+        // TX hash'den transaction detaylarını çek
+        let tx_hash_bytes = req.tx_hash.parse::<alloy::primitives::TxHash>()
             .map_err(|e| anyhow::anyhow!("Invalid tx hash: {}", e))?;
 
-        // Input'u decode et
-        let input_bytes = hex::decode(&req.input_hex[2..])
-            .context("Failed to decode input hex")?;
+        let tx_data = provider.get_transaction_by_hash(tx_hash_bytes).await
+            .map_err(|e| anyhow::anyhow!("Failed to fetch transaction: {}", e))?
+            .ok_or_else(|| anyhow::anyhow!("Transaction not found: {}", req.tx_hash))?;
 
+        // Input'u transaction'dan al
+        let input_bytes = tx_data.input().clone();
+
+        let input_hex = format!("0x{}", hex::encode(&input_bytes));
+
+        // Try to decode as submitRequest
         let decoded = match IBoundlessMarket::submitRequestCall::abi_decode(&input_bytes) {
             Ok(call) => call,
             Err(_) => {
-                return Err(anyhow::anyhow!("Transaction is not submitRequest"));
+                tracing::debug!("Transaction is not submitRequest, skipping");
+                return Ok(());
             }
         };
 
@@ -445,8 +465,8 @@ where
             }
         };
 
-        // Try to get confirmed transaction data
-        let final_order = match Self::fetch_confirmed_transaction_data_by_input(provider.clone(), &req.input_hex).await {
+        // Try to get confirmed transaction data (process_market_tx'teki gibi)
+        let final_order = match Self::fetch_confirmed_transaction_data_by_input(provider.clone(), &input_hex).await {
             Ok(confirmed_request) => {
                 tracing::info!("✅ Got CONFIRMED data, creating updated order: 0x{:x}", request_id);
 
