@@ -35,6 +35,9 @@ pub enum ProvingErr {
     #[error("{code} Proving failed after retries: {0:?}", code = self.code())]
     ProvingFailed(anyhow::Error),
 
+    #[error("{code} Temporary proving failure, will retry later: {0:?}", code = self.code())]
+    TemporaryFailure(anyhow::Error),
+
     #[error("{code} Request fulfilled by another prover", code = self.code())]
     ExternallyFulfilled,
 
@@ -51,6 +54,7 @@ impl CodedError for ProvingErr {
     fn code(&self) -> &str {
         match self {
             ProvingErr::ProvingFailed(_) => "[B-PRO-501]",
+            ProvingErr::TemporaryFailure(_) => "[B-PRO-504]",
             ProvingErr::ExternallyFulfilled => "[B-PRO-502]",
             ProvingErr::ProvingTimedOut => "[B-PRO-503]",
             ProvingErr::UnexpectedError(_) => "[B-PRO-500]",
@@ -445,7 +449,16 @@ impl RetryTask for ProvingService {
 }
 
 async fn handle_order_failure(db: &DbObj, order_id: &str, failure_reason: &'static str) {
-    if let Err(inner_err) = db.set_order_failure(order_id, failure_reason).await {
-        tracing::error!("Failed to set order {order_id} failure: {inner_err:?}");
+    tracing::warn!(
+        "Order {} encountered failure: {}. Resetting to PendingProving for complete retry.",
+        order_id,
+        failure_reason
+    );
+    tokio::time::sleep(Duration::from_secs(180)).await;
+    // ✅ Order'ı tamamen temizle ve PendingProving'e çek
+    if let Err(e) = db.reset_order_to_pending_proving(order_id).await {
+        tracing::error!("Failed to reset order {} to PendingProving: {e:?}", order_id);
+    } else {
+        tracing::info!("Order {} reset to PendingProving, will be picked up by main loop", order_id);
     }
 }

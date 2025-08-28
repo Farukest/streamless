@@ -138,6 +138,7 @@ pub trait BrokerDb {
     ) -> Result<(ProofRequest, Bytes, String, B256, U256, FulfillmentType), DbError>;
     async fn get_order_compressed_proof_id(&self, id: &str) -> Result<String, DbError>;
     async fn set_order_failure(&self, id: &str, failure_str: &'static str) -> Result<(), DbError>;
+    async fn reset_order_to_pending_proving(&self, id: &str) -> Result<(), DbError>;
     async fn set_order_complete(&self, id: &str) -> Result<(), DbError>;
     /// Get all orders that are committed to be prove and be fulfilled.
     async fn get_committed_orders(&self) -> Result<Vec<Order>, DbError>;
@@ -541,6 +542,36 @@ impl BrokerDb for SqliteDb {
             return Err(DbError::OrderNotFound(id.to_string()));
         }
 
+        Ok(())
+    }
+
+    #[instrument(level = "trace", skip_all, fields(id = %format!("{id}")))]
+    async fn reset_order_to_pending_proving(&self, id: &str) -> Result<(), DbError> {
+        let res = sqlx::query(
+            r#"
+            UPDATE orders
+            SET data = json_remove(
+                       json_remove(
+                       json_remove(
+                       json_remove(
+                       json_set(data, '$.status', $1),
+                       '$.proof_id'),
+                       '$.compressed_proof_id'),
+                       '$.updated_at'),
+                       '$.proving_started_at')
+            WHERE id = $2
+            "#,
+        )
+            .bind(OrderStatus::PendingProving)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+
+        if res.rows_affected() == 0 {
+            return Err(DbError::OrderNotFound(id.to_string()));
+        }
+
+        tracing::debug!("Order {} reset to PendingProving state", id);
         Ok(())
     }
 
