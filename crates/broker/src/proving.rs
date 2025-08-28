@@ -449,7 +449,7 @@ impl RetryTask for ProvingService {
 }
 
 async fn handle_order_failure(db: &DbObj, order_id: &str, failure_reason: &'static str) {
-    tracing::warn!(
+    tracing::info!(
         "Order {} encountered failure: {}. Resetting to PendingProving for complete retry.",
         order_id,
         failure_reason
@@ -457,7 +457,7 @@ async fn handle_order_failure(db: &DbObj, order_id: &str, failure_reason: &'stat
     tokio::time::sleep(Duration::from_secs(180)).await;
     // ✅ Order'ı tamamen temizle ve PendingProving'e çek
     if let Err(e) = db.reset_order_to_pending_proving(order_id).await {
-        tracing::error!("Failed to reset order {} to PendingProving: {e:?}", order_id);
+        tracing::info!("Failed to reset order {} to PendingProving: {e:?}", order_id);
     } else {
         tracing::info!("Order {} reset to PendingProving, will be picked up by main loop", order_id);
     }
