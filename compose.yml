@@ -1,4 +1,5 @@
 name: bento
+# 8X SIMPLE POD
 # Anchors:
 x-base-environment: &base-environment
   DATABASE_URL: postgresql://${POSTGRES_USER:-worker}:${POSTGRES_PASSWORD:-password}@${POSTGRES_HOST:-postgres}:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-taskdb}
@@ -12,7 +13,7 @@ x-base-environment: &base-environment
 
 x-agent-common: &agent-common
   image: risczero/risc0-bento-agent:2.3.1@sha256:7873f18005efff03fc5399f1bdcb6760cda7ffbd4fdd4d9c39aedee8972e0a0d
-  restart: always
+  restart: unless-stopped
   depends_on:
     - postgres
     - redis
@@ -22,14 +23,28 @@ x-agent-common: &agent-common
 
 x-exec-agent-common: &exec-agent-common
   <<: *agent-common
-  mem_limit: 15G
-  cpus: 5
+  mem_limit: 65G
+  cpus: 15
   environment:
     <<: *base-environment
     LD_LIBRARY_PATH: ${LD_LIBRARY_PATH:-/usr/local/cuda-12.2/compat/}
     RISC0_KECCAK_PO2: ${RISC0_KECCAK_PO2:-17}
     SEGMENT_SIZE: 21
   entrypoint: /app/agent -t exec --segment-po2 ${SEGMENT_SIZE:-21} --redis-ttl ${REDIS_TTL:-57600}
+
+x-gpu-agent-common: &gpu-agent-common
+  <<: *agent-common
+  runtime: nvidia
+  restart: unless-stopped
+  mem_limit: 80G
+  cpus: 12
+  entrypoint: /app/agent -t prove --redis-ttl ${REDIS_TTL:-57600}
+  healthcheck:
+    test: ["CMD-SHELL", "pgrep -f 'agent.*prove' && ps -p $(pgrep -f 'agent.*prove') -o etime= | awk '{if($1 ~ /[0-9]+-/) exit 1}' || exit 1"]
+    interval: 45s
+    timeout: 15s
+    retries: 2
+    start_period: 120s
 
 x-broker-environment: &broker-environment
   RUST_LOG: ${RUST_LOG:-info,broker=debug,boundless_market=debug}
@@ -52,6 +67,13 @@ x-broker-common: &broker-common
   depends_on:
     - rest_api
     - gpu_prove_agent0
+    - gpu_prove_agent1
+    - gpu_prove_agent2
+    - gpu_prove_agent3
+    - gpu_prove_agent4
+    - gpu_prove_agent5
+    - gpu_prove_agent6
+    - gpu_prove_agent7
     - exec_agent0
     - exec_agent1
     - aux_agent
@@ -62,8 +84,8 @@ x-broker-common: &broker-common
   build:
     context: .
     dockerfile: dockerfiles/broker.dockerfile
-  mem_limit: 2G
-  cpus: 2
+  mem_limit: 32G
+  cpus: 12
   stop_grace_period: 3h
   network_mode: host
 
@@ -74,6 +96,8 @@ services:
     restart: always
     ports:
       - 6379:6379
+    expose:
+      - 6379
     volumes:
       - redis-data:/data
 
@@ -100,6 +124,8 @@ services:
     ports:
       - '9000:9000'
       - '9001:9001'
+    expose:
+      - 9000
     volumes:
       - minio-data:/data
     command: server /data --console-address ":9001"
@@ -137,6 +163,19 @@ services:
       - redis
       - minio
 
+  # Autoheal servis - unhealthy konteynerları kill+recreate yapar
+  autoheal:
+    image: willfarrell/autoheal:latest
+    restart: always
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - AUTOHEAL_CONTAINER_LABEL=all
+      - AUTOHEAL_INTERVAL=30
+      - AUTOHEAL_START_PERIOD=300
+    labels:
+      - autoheal=false
+
   exec_agent0:
     <<: *exec-agent-common
 
@@ -145,29 +184,107 @@ services:
 
   aux_agent:
     <<: *agent-common
-    mem_limit: 256M
-    cpus: 1
+    mem_limit: 16G
+    cpus: 4
     environment:
       <<: *base-environment
       LD_LIBRARY_PATH: ${LD_LIBRARY_PATH:-/usr/local/cuda-12.2/compat/}
-
     entrypoint: /app/agent -t aux --monitor-requeue --redis-ttl ${REDIS_TTL:-57600}
 
   gpu_prove_agent0:
-    <<: *agent-common
-    runtime: nvidia
-    mem_limit: 24G
-    cpus: 10
-    entrypoint: /app/agent -t prove --redis-ttl ${REDIS_TTL:-57600}
-
-    # comment-out if running in CPU proving mode
+    <<: *gpu-agent-common
+    labels:
+      - autoheal=true
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              # TODO: how to scale this with N gpus?
               device_ids: ['0']
+              capabilities: [gpu]
+
+  gpu_prove_agent1:
+    <<: *gpu-agent-common
+    labels:
+      - autoheal=true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['1']
+              capabilities: [gpu]
+
+  gpu_prove_agent2:
+    <<: *gpu-agent-common
+    labels:
+      - autoheal=true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['2']
+              capabilities: [gpu]
+
+  gpu_prove_agent3:
+    <<: *gpu-agent-common
+    labels:
+      - autoheal=true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['3']
+              capabilities: [gpu]
+
+  gpu_prove_agent4:
+    <<: *gpu-agent-common
+    labels:
+      - autoheal=true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['4']
+              capabilities: [gpu]
+
+  gpu_prove_agent5:
+    <<: *gpu-agent-common
+    labels:
+      - autoheal=true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['5']
+              capabilities: [gpu]
+
+  gpu_prove_agent6:
+    <<: *gpu-agent-common
+    labels:
+      - autoheal=true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['6']
+              capabilities: [gpu]
+
+  gpu_prove_agent7:
+    <<: *gpu-agent-common
+    labels:
+      - autoheal=true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['7']
               capabilities: [gpu]
 
   snark_agent:
@@ -176,7 +293,6 @@ services:
     environment:
       <<: *base-environment
       LD_LIBRARY_PATH: ${LD_LIBRARY_PATH:-/usr/local/cuda-12.2/compat/}
-
     ulimits:
       # Needed for stark_verify bin
       # TODO: this number was just guess and check found
@@ -188,16 +304,12 @@ services:
     depends_on:
       - postgres
       - minio
-
-    mem_limit: 1G
-    cpus: 1
-
+    mem_limit: 16G
+    cpus: 5
     environment:
       <<: *base-environment
-
     ports:
       - '8081:8081'
-
     entrypoint: /app/rest_api --bind-addr 0.0.0.0:8081 --snark-timeout ${SNARK_TIMEOUT:-3600}
 
   broker:
@@ -214,7 +326,6 @@ services:
     # - type: bind
     #   source: ./target/riscv-guest/guest-assessor/assessor-guest/riscv32im-risc0-zkvm-elf/release/assessor-guest.bin
     #   target: /target/riscv-guest/guest-assessor/assessor-guest/riscv32im-risc0-zkvm-elf/release/assessor-guest.bin
-
     environment:
       <<: *broker-environment
       PRIVATE_KEY: ${PRIVATE_KEY}
@@ -224,7 +335,6 @@ services:
     expose:
       - "3001"       # Make port available to other containers
     entrypoint: /app/broker --db-url 'sqlite:///db/broker.db' --config-file /app/broker.toml --bento-api-url http://localhost:8081
-
 
 # # Example second broker with different configuration
 # broker2:
