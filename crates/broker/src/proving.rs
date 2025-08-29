@@ -316,7 +316,7 @@ impl ProvingService {
             || async { self.get_or_create_stark_session(order.clone()).await },
             "get_or_create_stark_session",
         )
-        .await
+            .await
         {
             Ok(proof_id) => proof_id,
             Err(err) => {
@@ -337,7 +337,7 @@ impl ProvingService {
             || async { self.monitor_proof_with_timeout(order.clone()).await },
             "monitor_proof_with_timeout",
         )
-        .await;
+            .await;
 
         match result {
             Ok(order_status) => {
@@ -379,7 +379,7 @@ impl ProvingService {
                     &order,
                     "Order expired on startup",
                 )
-                .await;
+                    .await;
             }
             let prove_serv = self.clone();
 
@@ -449,6 +449,12 @@ impl RetryTask for ProvingService {
 }
 
 async fn handle_order_failure(db: &DbObj, order_id: &str, failure_reason: &'static str) {
+
+    tracing::info!("HANDLE FAILURE HATASI TEKRAR BASLATIYORUZ");
+    tracing::info!("HANDLE FAILURE HATASI TEKRAR BASLATIYORUZ");
+    tracing::info!("HANDLE FAILURE HATASI TEKRAR BASLATIYORUZ");
+
+
     tracing::info!(
         "Order {} encountered failure: {}. Resetting to PendingProving for complete retry.",
         order_id,
